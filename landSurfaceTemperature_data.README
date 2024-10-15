@@ -1,0 +1,713 @@
+README
+Land Surface Temperature (LST) Analysis in the Post Oak Savannah Ecoregion
+Author: Horia Olariu
+Table of Contents
+
+    Introduction
+    Prerequisites
+    Setup and Usage Instructions
+    Code Overview
+        Section 1: MODIS Day Reference Check
+        Section 2: Landsat 8 and 9 (2013-2023)
+        Section 3: Landsat 5-7 (2008-2012)
+    Output Details
+    Notes and Considerations
+    Troubleshooting
+    Contact Information
+
+Introduction
+
+This script performs a comprehensive analysis of Land Surface Temperature (LST) in the East Central Texas Forests ecoregion using data from MODIS, Landsat 8 and 9, and Landsat 5 and 7 satellites. The analysis spans from 2008 to 2023 and includes the following key tasks:
+
+    Calculating average annual LST using MODIS data for a reference year (2009).
+    Processing Landsat 8 and 9 imagery to calculate LST for a user-defined year between 2013 and 2023.
+    Processing Landsat 5 and 7 imagery to calculate LST for a user-defined year between 2008 and 2012.
+    Masking out water bodies and urban areas to focus on natural land surfaces.
+    Applying cloud masking, scaling factors, and emissivity corrections.
+    Calculating and exporting valid LST images and mean LST values for the ecoregion.
+
+Prerequisites
+
+Before running the script, ensure you have:
+
+    Google Earth Engine Account:
+        Sign up for an account at Google Earth Engine.
+
+    Basic Understanding of GEE:
+        Familiarity with the GEE Code Editor and JavaScript syntax is helpful for modifying and running the script.
+
+    Access to Required Datasets:
+
+        The script uses publicly available datasets:
+            MODIS Land Surface Temperature and Emissivity 8-Day Global 1km (MOD11A2): MODIS/061/MOD11A2
+            MODIS Land Cover Type (MCD12Q1): MODIS/061/MCD12Q1
+            Landsat 8 Collection 2 Level 2: LANDSAT/LC08/C02/T1_L2
+            Landsat 9 Collection 2 Level 2: LANDSAT/LC09/C02/T1_L2
+            Landsat 5 Collection 2 Level 2: LANDSAT/LT05/C02/T1_L2
+            Landsat 7 Collection 2 Level 2: LANDSAT/LE07/C02/T1_L2
+            RESOLVE Ecoregions 2017: RESOLVE/ECOREGIONS/2017
+
+    Sufficient Storage Space:
+        Ensure you have enough space in your GEE assets for exporting images.
+
+Setup and Usage Instructions
+Step 1: Access Google Earth Engine Code Editor
+
+    Open the GEE Code Editor.
+
+Step 2: Copy the Script
+  
+////
+//// MODIS Day reference check
+////
+
+// Step 1: Define the Area of Interest (AOI) - East Central Texas Forests Ecoregion
+var ecoregions = ee.FeatureCollection("RESOLVE/ECOREGIONS/2017");
+var aoi = ecoregions.filter(ee.Filter.eq('ECO_NAME', 'East Central Texas forests'));
+Map.addLayer(aoi, {}, 'East Central Texas forests');
+
+// Step 2: Define the time period for the year 2010 (instead of 2023)
+var startDate = ee.Date('2009-01-01');
+var endDate = ee.Date('2009-12-31');
+
+// Step 3: Load the MODIS Land Surface Temperature data (MYD11A2) and filter by date
+var modisLST = ee.ImageCollection('MODIS/061/MOD11A2')
+  .filterDate(startDate, endDate)
+  .filterBounds(aoi)
+  .select('LST_Day_1km');  // Selecting daytime LST band
+
+// Step 4: Scale the LST data (MODIS LST values need to be multiplied by 0.02 to convert to Kelvin)
+var scaleLST = modisLST.map(function(image) {
+  return image.multiply(0.02).subtract(273.15).set('system:time_start', image.get('system:time_start'));  // Convert to Celsius
+});
+
+// Step 5: Load the MODIS Land Cover Type dataset (MCD12Q1) for the year 2010
+var modisLandCover = ee.Image('MODIS/061/MCD12Q1/2009_01_01').select('LC_Type1');
+
+// Land cover classes for water and urban (IGBP classification)
+// 0: Water, 13: Urban
+var waterMask = modisLandCover.eq(0);  // Water class
+var urbanMask = modisLandCover.eq(13);  // Urban class
+
+// Combine the masks to exclude water and urban areas
+var combinedMask = waterMask.or(urbanMask).not();  // Mask out water and urban areas (invert the mask)
+
+// Step 6: Apply the mask to the LST data
+var maskedLST = scaleLST.map(function(image) {
+  return image.updateMask(combinedMask);
+});
+
+// Step 7: Calculate the mean LST over the year 2010, excluding water bodies and urban areas
+var meanLST = maskedLST.mean().clip(aoi);
+
+// Step 8: Add the mean LST layer to the map
+Map.addLayer(meanLST, {
+  min: 10,
+  max: 40,
+  palette: ['blue', 'green', 'red']
+}, 'Mean LST (Celsius) - 2010 (Masked)');
+
+// Step 9: Calculate the mean LST value for the East Central Texas Forests region, excluding water and urban areas
+var meanLSTValue = meanLST.reduceRegion({
+  reducer: ee.Reducer.mean(),
+  geometry: aoi,
+  scale: 1000,  // MODIS LST has a 1km resolution
+  bestEffort: true,
+  maxPixels: 1e13
+});
+
+// Step 10: Print the average annual LST for 2010, excluding water bodies and urban areas
+meanLSTValue.evaluate(function(result) {
+  print('Mean LST (Celsius) for 2010 (Masked):', result.LST_Day_1km);  // Corrected to LST_Day_1km
+});
+
+
+////
+//// LS 8 and 9 (2013-2023)
+////
+
+
+
+// Step 1: Define the Area of Interest (AOI) - East Central Texas Forests Ecoregion
+var ecoregions = ee.FeatureCollection("RESOLVE/ECOREGIONS/2017");
+var aoi = ecoregions.filter(ee.Filter.eq('ECO_NAME', 'East Central Texas forests'));
+Map.centerObject(aoi, 8);
+Map.addLayer(aoi, {}, 'East Central Texas forests');
+
+// Define the year (you can change this)
+var year = 2020;  // Set the year you want to analyze
+
+// Correct date format: YYYY-MM-DD
+var startDate = ee.Date.fromYMD(year, 1, 1);
+var endDate = ee.Date.fromYMD(year, 12, 31);
+
+// Cloud masking function for Landsat 8
+function cloudMaskLandsat(image) {
+  var qa = image.select('QA_PIXEL');
+  var cloudBitMask = (1 << 5); // Clouds
+  var cloudShadowBitMask = (1 << 3); // Cloud Shadows
+  var mask = qa.bitwiseAnd(cloudBitMask).eq(0)
+                .and(qa.bitwiseAnd(cloudShadowBitMask).eq(0));
+  return image.updateMask(mask);
+}
+
+// Apply scaling factors for Landsat 8
+function applyScaleFactors(image) {
+  var opticalBands = image.select('SR_B.').multiply(0.0000275).add(-0.2);  // Optical bands
+  var thermalBands = image.select('ST_B10').multiply(0.00341802).add(149.0);  // Thermal band
+  return image.addBands(opticalBands, null, true).addBands(thermalBands, null, true);
+}
+
+// Import and preprocess Landsat 8 imagery
+var landsatProcessed = ee.ImageCollection('LANDSAT/LC08/C02/T1_L2')  // Landsat 8
+                        .filterBounds(aoi)
+                        .filterDate(startDate, endDate)
+                        .map(cloudMaskLandsat)
+                        .map(applyScaleFactors)
+                        .median()
+                        .clip(aoi);
+
+// Add the processed image to the map for visualization (True Color)
+Map.addLayer(landsatProcessed, {
+  bands: ['SR_B4', 'SR_B3', 'SR_B2'],
+  min: 0.0,
+  max: 0.15  // Adjust this range for better visibility
+}, 'Processed Landsat 8 True Color (' + year + ')');
+
+// Calculate Normalized Difference Vegetation Index (NDVI)
+var ndvi = landsatProcessed.normalizedDifference(['SR_B5', 'SR_B4']).rename('NDVI');
+
+// Add NDVI to the map
+Map.addLayer(ndvi, {
+  min: -1,
+  max: 1,
+  palette: ['blue', 'white', 'green']
+}, 'NDVI (' + year + ')');
+
+// Compute NDVI min and max
+var ndviMin = ndvi.reduceRegion({
+  reducer: ee.Reducer.min(),
+  geometry: aoi,
+  scale: 30,
+  bestEffort: true,
+  maxPixels: 1e9
+});
+
+var ndviMax = ndvi.reduceRegion({
+  reducer: ee.Reducer.max(),
+  geometry: aoi,
+  scale: 30,
+  bestEffort: true,
+  maxPixels: 1e9
+});
+
+// Print NDVI Min and Max to check if they are valid
+print('NDVI Min:', ndviMin.get('NDVI'));
+print('NDVI Max:', ndviMax.get('NDVI'));
+
+// If NDVI range is too narrow or invalid, use a default emissivity value
+var defaultEmissivity = 0.98;
+
+// Check for valid NDVI range before calculating Fraction of Vegetation (FV)
+if (ndviMin.get('NDVI') !== null && ndviMax.get('NDVI') !== null && ndviMin.get('NDVI') < ndviMax.get('NDVI')) {
+  var fv = ((ndvi.subtract(ee.Number(ndviMin.get('NDVI')))).divide(ee.Number(ndviMax.get('NDVI')).subtract(ee.Number(ndviMin.get('NDVI'))))).pow(2).rename('FV');
+  
+  // Add FV to the map
+  Map.addLayer(fv, {min: 0, max: 1, palette: ['white', 'green']}, 'Fraction of Vegetation (' + year + ')');
+  
+  // Emissivity Calculation from FV
+  var em = fv.multiply(0.004).add(0.986).rename('EM');
+  
+  // Add Emissivity to the map
+  Map.addLayer(em, {min: 0.98, max: 1.0, palette: ['white', 'green']}, 'Emissivity (' + year + ')');
+  
+} else {
+  print('NDVI range is too narrow for ' + year + ', using default emissivity value: ' + defaultEmissivity);
+  var em = ee.Image.constant(defaultEmissivity).clip(aoi).rename('EM');
+}
+
+// Select Thermal Band (Band 10)
+var thermal = landsatProcessed.select('ST_B10').rename('thermal');
+
+// Land Surface Temperature (LST) Calculation with emissivity
+var lst = thermal.expression(
+  '(TB / (1 + (0.00115 * (TB / 1.438)) * log(em))) - 273.15', {
+    'TB': thermal.select('thermal'),
+    'em': em
+  }).rename('LST_' + year);  // Rename the LST band to include the year dynamically (no spaces)
+
+// Add LST to the map for visualization
+Map.addLayer(lst, {
+  min: 18.47, 
+  max: 42.86, 
+  palette: [
+    '040274', '040281', '0502a3', '0502b8', '0502ce', '0502e6',
+    '0602ff', '235cb1', '307ef3', '269db1', '30c8e2', '32d3ef',
+    '3be285', '3ff38f', '86e26f', '3ae237', 'b5e22e', 'd6e21f',
+    'fff705', 'ffd611', 'ffb613', 'ff8b13', 'ff6e08', 'ff500d',
+    'ff0000', 'de0101', 'c21301', 'a71001', '911003'
+  ]
+}, 'Land Surface Temperature (' + year + ')');
+
+// Filter out invalid LST values by setting reasonable thresholds
+var validLST = lst.updateMask(lst.gt(-50).and(lst.lt(70)));  // LST should reasonably fall within this range (in °C)
+
+// Add the valid LST values to the map
+Map.addLayer(validLST, {
+  min: 18.47,
+  max: 42.86,
+  palette: [
+    '040274', '040281', '0502a3', '0502b8', '0502ce', '0502e6',
+    '0602ff', '235cb1', '307ef3', '269db1', '30c8e2', '32d3ef',
+    '3be285', '3ff38f', '86e26f', '3ae237', 'b5e22e', 'd6e21f',
+    'fff705', 'ffd611', 'ffb613', 'ff8b13', 'ff6e08', 'ff500d',
+    'ff0000', 'de0101', 'c21301', 'a71001', '911003'
+  ]
+}, 'Valid Land Surface Temperature (' + year + ')');
+
+// Calculate the mean annual LST over the valid pixels
+var meanLST = validLST.reduceRegion({
+  reducer: ee.Reducer.mean(),
+  geometry: aoi,
+  scale: 100,  // Increase scale to avoid precision issues
+  bestEffort: true,
+  maxPixels: 1e13  // Ensure enough pixels are considered
+});
+
+// Safely access the mean LST without hardcoding keys
+meanLST.evaluate(function(result) {
+  print('Mean Land Surface Temperature (' + year + '):', result);
+});
+
+// Export the valid LST image to your assets with EPSG:3857 projection
+Export.image.toAsset({
+  image: validLST.reproject({
+    crs: 'EPSG:3857',  // Set projection to EPSG:3857 (Web Mercator)
+    scale: 30  // Adjust scale based on your needs (30m resolution)
+  }),
+  description: 'validLST_' + year + '_Export',  // Description for the export task
+  region: aoi.geometry(),  // Use the area of interest (AOI) as the region
+  scale: 30,  // Export scale (adjust as needed)
+  maxPixels: 1e13  // Allow large export sizes
+});
+
+
+
+
+////
+//// LS 5-7 (2008-2012)
+////
+
+// Step 1: Define the Area of Interest (AOI) - East Central Texas Forests Ecoregion
+var ecoregions = ee.FeatureCollection("RESOLVE/ECOREGIONS/2017");
+var aoi = ecoregions.filter(ee.Filter.eq('ECO_NAME', 'East Central Texas forests'));
+Map.centerObject(aoi, 8);
+Map.addLayer(aoi, {}, 'East Central Texas forests');
+
+// Define the year (you can change this)
+var year = 2012;  // Set the year you want to analyze
+
+// Correct date format: YYYY-MM-DD
+var startDate = ee.Date.fromYMD(year, 1, 1);
+var endDate = ee.Date.fromYMD(year, 12, 31);
+
+// Cloud masking function for Landsat 5 and Landsat 7
+function cloudMaskLandsat57(image) {
+  var qa = image.select('QA_PIXEL');
+  var cloudBitMask = (1 << 5); // Clouds
+  var cloudShadowBitMask = (1 << 3); // Cloud Shadows
+  var mask = qa.bitwiseAnd(cloudBitMask).eq(0)
+                .and(qa.bitwiseAnd(cloudShadowBitMask).eq(0));
+  return image.updateMask(mask);
+}
+
+// Apply scaling factors for Landsat 5 and Landsat 7
+function applyScaleFactorsLandsat57(image) {
+  var opticalBands = image.select(['SR_B1', 'SR_B2', 'SR_B3', 'SR_B4', 'SR_B5', 'SR_B7']).multiply(0.0000275).add(-0.2);  // Optical bands
+  var thermalBands = image.select('ST_B6').multiply(0.00341802).add(149.0);  // Thermal band
+  return image.addBands(opticalBands, null, true).addBands(thermalBands, null, true);
+}
+
+// Function to apply scan line correction using neighborhood median
+function fillScanLineGaps(image) {
+  var filled = image.focal_mean({radius: 2, kernelType: 'square', iterations: 3});
+  return image.unmask(filled);
+}
+
+// Import and preprocess Landsat 5 and Landsat 7 imagery
+var landsatProcessed = ee.ImageCollection('LANDSAT/LT05/C02/T1_L2')  // Landsat 5
+                        .merge(ee.ImageCollection('LANDSAT/LE07/C02/T1_L2'))  // Landsat 7
+                        .filterBounds(aoi)
+                        .filterDate(startDate, endDate)
+                        .map(cloudMaskLandsat57)
+                        .map(applyScaleFactorsLandsat57)
+                        .map(fillScanLineGaps)  // Apply scan line correction
+                        .median()
+                        .clip(aoi);
+
+// Add the processed image to the map for visualization (True Color)
+Map.addLayer(landsatProcessed, {
+  bands: ['SR_B3', 'SR_B2', 'SR_B1'],  // Landsat 5/7 True Color bands
+  min: 0.0,
+  max: 0.15  // Adjust this range for better visibility
+}, 'Processed Landsat 5/7 True Color (' + year + ')');
+
+// Calculate Normalized Difference Vegetation Index (NDVI)
+var ndvi = landsatProcessed.normalizedDifference(['SR_B4', 'SR_B3']).rename('NDVI');
+
+// Add NDVI to the map
+Map.addLayer(ndvi, {
+  min: -1,
+  max: 1,
+  palette: ['blue', 'white', 'green']
+}, 'NDVI (' + year + ')');
+
+// Compute NDVI min and max
+var ndviMin = ndvi.reduceRegion({
+  reducer: ee.Reducer.min(),
+  geometry: aoi,
+  scale: 30,
+  bestEffort: true,
+  maxPixels: 1e9
+});
+
+var ndviMax = ndvi.reduceRegion({
+  reducer: ee.Reducer.max(),
+  geometry: aoi,
+  scale: 30,
+  bestEffort: true,
+  maxPixels: 1e9
+});
+
+// Print NDVI Min and Max to check if they are valid
+print('NDVI Min:', ndviMin.get('NDVI'));
+print('NDVI Max:', ndviMax.get('NDVI'));
+
+// If NDVI range is too narrow or invalid, use a default emissivity value
+var defaultEmissivity = 0.98;
+
+// Check for valid NDVI range before calculating Fraction of Vegetation (FV)
+if (ndviMin.get('NDVI') !== null && ndviMax.get('NDVI') !== null && ndviMin.get('NDVI') < ndviMax.get('NDVI')) {
+  var fv = ((ndvi.subtract(ee.Number(ndviMin.get('NDVI')))).divide(ee.Number(ndviMax.get('NDVI')).subtract(ee.Number(ndviMin.get('NDVI'))))).pow(2).rename('FV');
+  
+  // Add FV to the map
+  Map.addLayer(fv, {min: 0, max: 1, palette: ['white', 'green']}, 'Fraction of Vegetation (' + year + ')');
+  
+  // Emissivity Calculation from FV
+  var em = fv.multiply(0.004).add(0.986).rename('EM');
+  
+  // Add Emissivity to the map
+  Map.addLayer(em, {min: 0.98, max: 1.0, palette: ['white', 'green']}, 'Emissivity (' + year + ')');
+  
+} else {
+  print('NDVI range is too narrow for ' + year + ', using default emissivity value: ' + defaultEmissivity);
+  var em = ee.Image.constant(defaultEmissivity).clip(aoi).rename('EM');
+}
+
+// Select Thermal Band (Band 6 for Landsat 5/7)
+var thermal = landsatProcessed.select('ST_B6').rename('thermal');
+
+// Land Surface Temperature (LST) Calculation with emissivity
+var lst = thermal.expression(
+  '(TB / (1 + (0.00115 * (TB / 1.438)) * log(em))) - 273.15', {
+    'TB': thermal.select('thermal'),
+    'em': em
+  }).rename('LST POS ' + year);  // Rename the LST band to include the year dynamically
+
+// Add LST to the map for visualization
+Map.addLayer(lst, {
+  min: 18.47, 
+  max: 42.86, 
+  palette: [
+    '040274', '040281', '0502a3', '0502b8', '0502ce', '0502e6',
+    '0602ff', '235cb1', '307ef3', '269db1', '30c8e2', '32d3ef',
+    '3be285', '3ff38f', '86e26f', '3ae237', 'b5e22e', 'd6e21f',
+    'fff705', 'ffd611', 'ffb613', 'ff8b13', 'ff6e08', 'ff500d',
+    'ff0000', 'de0101', 'c21301', 'a71001', '911003'
+  ]
+}, 'Land Surface Temperature (' + year + ')');
+
+// Filter out invalid LST values by setting reasonable thresholds
+var validLST = lst.updateMask(lst.gt(-50).and(lst.lt(70)));  // LST should reasonably fall within this range (in °C)
+
+// Add the valid LST values to the map
+Map.addLayer(validLST, {
+  min: 18.47,
+  max: 42.86,
+  palette: [
+    '040274', '040281', '0502a3', '0502b8', '0502ce', '0502e6',
+    '0602ff', '235cb1', '307ef3', '269db1', '30c8e2', '32d3ef',
+    '3be285', '3ff38f', '86e26f', '3ae237', 'b5e22e', 'd6e21f',
+    'fff705', 'ffd611', 'ffb613', 'ff8b13', 'ff6e08', 'ff500d',
+    'ff0000', 'de0101', 'c21301', 'a71001', '911003'
+  ]
+}, 'Valid Land Surface Temperature (' + year + ')');
+
+// Calculate the mean annual LST over the valid pixels
+var meanLST = validLST.reduceRegion({
+  reducer: ee.Reducer.mean(),
+  geometry: aoi,
+  scale: 100,  // Increase scale to avoid precision issues
+  bestEffort: true,
+  maxPixels: 1e13  // Ensure enough pixels are considered
+});
+
+// Safely access the mean LST without hardcoding keys
+meanLST.evaluate(function(result) {
+  print('Mean Land Surface Temperature (' + year + '):', result);
+});
+
+// Set the export path (update with your own GEE assets path)
+var assetExportPath = 'users/your_username/validLST_2012';  // Replace 'your_username' with your GEE username
+
+// Set the export path (update with your own GEE assets path)
+var assetExportPath = 'users/your_username/validLST_2012';  // Replace 'your_username' with your GEE username
+
+// Rename the LST band to a valid name without spaces or special characters
+var validLSTExport = validLST.rename('LST_2012');
+
+// Export the valid LST image to your assets with EPSG:3857 projection
+Export.image.toAsset({
+  image: validLSTExport.reproject({
+    crs: 'EPSG:3857',  // Set projection to EPSG:3857 (Web Mercator)
+    scale: 30  // Adjust scale based on your needs (30m resolution)
+  }),
+  description: 'validLST_2012_Export',  // Description for the export task
+  region: aoi.geometry(),  // Use the area of interest (AOI) as the region
+  scale: 30,  // Export scale (adjust as needed)
+  maxPixels: 1e13  // Allow large export sizes
+});
+
+Step 3: Adjust Parameters
+
+    Area of Interest (AOI):
+        The script is set to the East Central Texas forests ecoregion.
+        Modify the ECO_NAME filter if you wish to analyze a different ecoregion.
+
+    Years:
+        For MODIS Data:
+            The reference year is set to 2009.
+            Change startDate and endDate in Section 1 if needed.
+        For Landsat 8 and 9:
+            Set the year variable (between 2013 and 2023) in Section 2.
+        For Landsat 5 and 7:
+            Set the year variable (between 2008 and 2012) in Section 3.
+
+    Export Paths:
+
+        Update the assetExportPath variable with your GEE username or desired asset path.
+
+        javascript
+
+        var assetExportPath = 'users/your_username/validLST_' + year;
+
+    Visualization Parameters:
+        Adjust min, max, and palette parameters in Map.addLayer functions if needed.
+
+Step 4: Run the Script
+
+    Click the Run button (▶️) at the top of the Code Editor.
+
+Step 5: Monitor Outputs
+
+    Map Panel:
+        View the added layers for visual inspection.
+    Console Panel:
+        Check printed messages for mean LST values and any notifications.
+    Tasks Panel:
+        The script initiates export tasks for valid LST images.
+        Click Run next to each task to start the export process.
+
+Step 6: Access Exported Data
+
+    Valid LST Images:
+        Exported to your GEE Assets under the names validLST_YYYY, where YYYY is the year.
+    Mean LST Values:
+        Printed in the Console for each year processed.
+
+Code Overview
+
+The script is divided into three main sections:
+Section 1: MODIS Day Reference Check
+
+Purpose:
+
+    Calculate the average annual Land Surface Temperature (LST) for the AOI using MODIS data for a reference year (2009).
+    Exclude water bodies and urban areas from the analysis.
+
+Key Steps:
+
+    Define AOI:
+        Load the RESOLVE Ecoregions dataset and filter for the East Central Texas forests.
+    Set Time Period:
+        Define startDate and endDate for the year 2009.
+    Load MODIS LST Data:
+        Use MODIS/061/MOD11A2 dataset.
+        Select the LST_Day_1km band.
+    Scale and Convert LST:
+        Convert MODIS LST values to Celsius.
+    Load MODIS Land Cover Data:
+        Use MODIS/061/MCD12Q1 for land cover classification.
+        Mask out water (class 0) and urban areas (class 13).
+    Apply Mask to LST Data:
+        Exclude water and urban pixels.
+    Calculate Mean LST:
+        Compute the mean LST over the AOI for the year 2009.
+    Print Results:
+        Display the mean LST in the Console.
+
+Section 2: Landsat 8 and 9 (2013-2023)
+
+Purpose:
+
+    Process Landsat 8 and 9 imagery to calculate LST for a specified year between 2013 and 2023.
+    Apply cloud masking, scaling factors, and emissivity corrections.
+    Export the valid LST image.
+
+Key Steps:
+
+    Define AOI and Year:
+        Use the same AOI.
+        Set the year variable (e.g., 2020).
+    Set Date Range:
+        Define startDate and endDate based on the selected year.
+    Cloud Masking Function:
+        Remove clouds and cloud shadows using QA_PIXEL band.
+    Apply Scaling Factors:
+        Adjust optical and thermal bands with scaling factors.
+    Import and Preprocess Imagery:
+        Load Landsat 8 collection.
+        Apply cloud masking and scaling.
+        Compute the median composite.
+    Calculate NDVI:
+        Compute the Normalized Difference Vegetation Index.
+    Calculate Fraction of Vegetation (FV) and Emissivity (EM):
+        Use NDVI to calculate FV and EM.
+        If NDVI range is invalid, use a default emissivity value (0.98).
+    Calculate LST:
+        Use the thermal band and emissivity to calculate LST.
+    Filter Invalid LST Values:
+        Exclude unreasonable LST values (e.g., outside -50°C to 70°C).
+    Calculate Mean LST:
+        Compute the mean LST over valid pixels in the AOI.
+    Export Valid LST Image:
+        Export the image to GEE assets with proper projection.
+
+Section 3: Landsat 5-7 (2008-2012)
+
+Purpose:
+
+    Similar to Section 2 but for Landsat 5 and 7 data between 2008 and 2012.
+    Includes additional steps to correct for the Landsat 7 scan line issue.
+
+Key Steps:
+
+    Define AOI and Year:
+        Use the same AOI.
+        Set the year variable (e.g., 2012).
+    Set Date Range:
+        Define startDate and endDate based on the selected year.
+    Cloud Masking Function:
+        Similar to Landsat 8 but tailored for Landsat 5 and 7.
+    Apply Scaling Factors:
+        Adjust optical and thermal bands for Landsat 5 and 7.
+    Scan Line Correction:
+        Use a focal mean to fill gaps caused by the Landsat 7 SLC-off issue.
+    Import and Preprocess Imagery:
+        Load and merge Landsat 5 and 7 collections.
+        Apply cloud masking, scaling, and scan line correction.
+        Compute the median composite.
+    Calculate NDVI, FV, and EM:
+        Similar steps as in Section 2.
+    Calculate LST:
+        Use the thermal band (ST_B6) for Landsat 5 and 7.
+    Filter Invalid LST Values:
+        Exclude unreasonable LST values.
+    Calculate Mean LST:
+        Compute the mean LST over valid pixels in the AOI.
+    Export Valid LST Image:
+        Export the image to GEE assets with proper projection.
+
+Output Details
+Valid LST Images
+
+    Location:
+        Exported to your GEE Assets.
+    Naming Convention:
+        validLST_YYYY (e.g., validLST_2020).
+    Details:
+        Contains the valid LST values for the specified year.
+        Clipped to the AOI and reprojected to EPSG:3857.
+        Bands are renamed appropriately (e.g., LST_2020).
+
+Mean LST Values
+
+    Location:
+        Printed in the Console.
+    Details:
+        Average LST over the AOI for the specified year.
+        Excludes invalid pixels and areas masked out (e.g., water, urban).
+
+Map Layers
+
+    Visualizations:
+        Processed imagery (True Color).
+        NDVI.
+        Fraction of Vegetation (FV).
+        Emissivity (EM).
+        Land Surface Temperature (LST).
+        Valid LST values.
+
+Notes and Considerations
+
+    Data Availability:
+        Ensure the selected years have sufficient data coverage.
+        Landsat 7 imagery after 2003 has scan line errors (SLC-off issue).
+
+    Emissivity Calculation:
+        If NDVI range is invalid, a default emissivity value (0.98) is used.
+        This may affect the accuracy of LST calculations.
+
+    Projection and Scale:
+        Images are reprojected to EPSG:3857 (Web Mercator) with a 30-meter scale.
+        Adjust crs and scale parameters if necessary.
+
+    Cloud Masking:
+        The script includes cloud masking functions for Landsat imagery.
+        May need adjustments based on specific cloud conditions in the AOI.
+
+    Visualization Parameters:
+        Adjust min, max, and palette values in Map.addLayer functions for better visualization.
+
+    Export Limitations:
+        GEE limits the number of export tasks that can run concurrently.
+        Monitor the Tasks panel and start exports as previous ones complete.
+
+Troubleshooting
+
+    No Data in Output:
+        Check if the selected year and date range contain imagery over the AOI.
+        Ensure that cloud masking isn't excluding all pixels.
+
+    Export Errors:
+        Verify that you have sufficient storage in your GEE assets.
+        Ensure maxPixels is set high enough to accommodate large images.
+
+    Invalid Mean LST Values:
+        If mean LST prints as null or unrealistic values, check the NDVI range and emissivity calculations.
+        Consider adjusting thresholds or using a different default emissivity.
+
+    Script Errors:
+        Check the Console for error messages.
+        Ensure all datasets are correctly loaded and accessible.
+
+Contact Information
+
+If you have any questions or need assistance, please contact:
+
+    Name: Horia Olariu
+    Email: horia@tamu.edu
+    GitHub: https://github.com/horiaolariu
+    Affiliation: Texas A&M University - ECCB
+
+Disclaimer: This script and documentation are provided "as is" without warranty of any kind. Use at your own risk. Ensure compliance with all data usage policies and licenses.
