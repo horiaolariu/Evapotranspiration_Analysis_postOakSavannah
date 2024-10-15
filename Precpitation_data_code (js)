@@ -1,0 +1,97 @@
+// Define the area of interest (aoi) as the East Central Texas Forests ecoregion
+var resolveEcoregions = ee.FeatureCollection("RESOLVE/ECOREGIONS/2017");
+var eastCentralTexasForests = resolveEcoregions.filter(ee.Filter.eq('ECO_NAME', 'East Central Texas forests'));
+
+// Get the exact geometry of the East Central Texas Forests ecoregion
+var aoiGeometry = eastCentralTexasForests.geometry();  // Use this geometry for clipping and export
+
+// Define the years of interest
+var years = ee.List.sequence(2008, 2023);
+
+// Load the DAYMET dataset
+var daymetDataset = ee.ImageCollection('NASA/ORNL/DAYMET_V4')
+              .filterBounds(aoiGeometry)
+              .select('prcp');  // Select only precipitation data
+
+// Create an empty FeatureCollection to store the statistics for each year
+var statsCollection = ee.FeatureCollection([]);
+
+// Define a function to compute summary statistics for each year's precipitation
+function getStats(image, geometry, year) {
+  var stats = image.reduceRegion({
+    reducer: ee.Reducer.min()
+              .combine(ee.Reducer.max(), '', true)
+              .combine(ee.Reducer.mean(), '', true)
+              .combine(ee.Reducer.median(), '', true)
+              .combine(ee.Reducer.stdDev(), '', true)
+              .combine(ee.Reducer.percentile([25]), '', true)  // Q1
+              .combine(ee.Reducer.percentile([75]), '', true), // Q3
+    geometry: geometry,
+    scale: 30,
+    maxPixels: 1e13,
+    bestEffort: true
+  });
+
+  // Convert the statistics into a Feature with properties
+  var statsFeature = ee.Feature(null, {
+    'year': year,
+    'min': stats.get('prcp_min'),
+    'max': stats.get('prcp_max'),
+    'mean': stats.get('prcp_mean'),
+    'median': stats.get('prcp_median'),
+    'stdDev': stats.get('prcp_stdDev'),
+    'Q1': stats.get('prcp_p25'),
+    'Q3': stats.get('prcp_p75')
+  });
+
+  // Append the Feature to the FeatureCollection
+  statsCollection = statsCollection.merge(ee.FeatureCollection([statsFeature]));
+}
+
+// Loop through each year, calculate statistics, and export both raster and statistics
+years.getInfo().forEach(function(year) {
+  // Filter DAYMET collection for the entire year (January 1 to December 31)
+  var daymetYear = daymetDataset
+    .filterDate(ee.Date.fromYMD(year, 1, 1), ee.Date.fromYMD(year, 12, 31))
+    .sum();  // Calculate the sum of precipitation for the entire year
+
+  // Clip to the exact geometry of the area of interest
+  var clipped = daymetYear.clip(aoiGeometry);
+
+  // Reproject to EPSG:3857 with 30-meter resolution
+  var reprojected = clipped.reproject({
+    crs: 'EPSG:3857',
+    scale: 30  // Use 30-meter scale to resample the image
+  });
+
+  // Export the processed image (raster) to the user's Google Earth Engine assets using the exact geometry
+  var description = 'Precipitation_' + year;
+  Export.image.toAsset({
+    image: reprojected,
+    description: description,
+    assetId: description,  // Replace with your GEE username or folder path if needed
+    region: aoiGeometry,   // Use the exact geometry for export
+    scale: 30,
+    crs: 'EPSG:3857',
+    maxPixels: 1e13
+  });
+
+  // Compute and collect the summary statistics for this year
+  getStats(clipped, aoiGeometry, year);
+  
+  // Print a message indicating the export has been started
+  print('Exporting Annual Precipitation image for the year:', year);
+});
+
+// Export the statistics as a CSV file to Google Drive
+Export.table.toDrive({
+  collection: statsCollection,
+  description: 'Precipitation_Statistics_East_Central_Texas_Forests',
+  fileFormat: 'CSV'
+});
+
+// Center the map on the area of interest for visualization
+Map.centerObject(eastCentralTexasForests, 7);
+
+// Display a message to indicate the script has finished setting up the exports
+print('All exports have been initiated.');
