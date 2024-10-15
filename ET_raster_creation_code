@@ -1,0 +1,455 @@
+////
+////                       CLOUD STATISTICS
+////
+
+
+// Step 1: Define the Area of Interest (AOI) - East Central Texas Forests Ecoregion
+var ecoregions = ee.FeatureCollection("RESOLVE/ECOREGIONS/2017");
+var aoi = ecoregions.filter(ee.Filter.eq('ECO_NAME', 'East Central Texas forests'));
+
+// Step 2: Load the 5 ET collections and sum the monthly values to get cloud-free count band for December 2022 to December 2023
+
+// Function to extract the 'count' band from each model
+function getCloudFreeCount(imageCollection, aoi) {
+  return imageCollection
+          .filterBounds(aoi)
+          .filterDate('2013-01-01', '2013-12-31')
+          .select('count')  // Select the count band
+          .sum()  // Sum across the year to get total cloud-free count
+          .clip(aoi);  // Clip to AOI
+}
+
+// EEMETRIC Count Band
+var eemetricCount = getCloudFreeCount(ee.ImageCollection("OpenET/EEMETRIC/CONUS/GRIDMET/MONTHLY/v2_0"), aoi);
+
+// PTJPL Count Band
+var ptjplCount = getCloudFreeCount(ee.ImageCollection("OpenET/PTJPL/CONUS/GRIDMET/MONTHLY/v2_0"), aoi);
+
+// DISALEXI Count Band
+var disalexiCount = getCloudFreeCount(ee.ImageCollection("OpenET/DISALEXI/CONUS/GRIDMET/MONTHLY/v2_0"), aoi);
+
+// SSEBOP Count Band
+var ssebopCount = getCloudFreeCount(ee.ImageCollection("OpenET/SSEBOP/CONUS/GRIDMET/MONTHLY/v2_0"), aoi);
+
+// GEESEBAL Count Band
+var geesebalCount = getCloudFreeCount(ee.ImageCollection("OpenET/GEESEBAL/CONUS/GRIDMET/MONTHLY/v2_0"), aoi);
+
+// Step 3: Compute summary statistics (min, max, mean, stdDev) for each cloud-free count band
+
+// Function to compute statistics for a count band
+function computeStatistics(image, name) {
+  var stats = image.reduceRegion({
+    reducer: ee.Reducer.min().combine(ee.Reducer.max(), '', true)
+                         .combine(ee.Reducer.mean(), '', true)
+                         .combine(ee.Reducer.stdDev(), '', true),
+    geometry: aoi.geometry(),
+    scale: 30,  // Use a 30m resolution
+    maxPixels: 1e13
+  });
+  
+  print('Statistics for ' + name, stats);
+}
+
+// Compute and print statistics for each model
+computeStatistics(eemetricCount, 'EEMETRIC');
+computeStatistics(ptjplCount, 'PTJPL');
+computeStatistics(disalexiCount, 'DISALEXI');
+computeStatistics(ssebopCount, 'SSEBOP');
+computeStatistics(geesebalCount, 'GEESEBAL');
+
+////
+//// Processing 
+////
+
+
+
+// Step 1: Define the Area of Interest (AOI) - East Central Texas Forests Ecoregion
+var ecoregions = ee.FeatureCollection("RESOLVE/ECOREGIONS/2017");
+var aoi = ecoregions.filter(ee.Filter.eq('ECO_NAME', 'East Central Texas forests'));
+
+// Step 2: Define the cloud-free threshold
+var cloudFreeThreshold = 17;
+
+// Function to get the cloud-free count mask 
+function getCloudFreeMask(imageCollection, aoi) {
+  var countBand = imageCollection
+                    .filterBounds(aoi)
+                    .filterDate('2022-01-01', '2022-12-31')
+                    .select('count')  // Select the count band
+                    .sum()  // Sum across the year to get total cloud-free count
+                    .clip(aoi);
+  
+  // Create mask for pixels that have cloud-free counts greater than set threshold 
+  return countBand.gte(cloudFreeThreshold);  // Mask where count >= threshold
+}
+
+// Function to apply cloud-free mask to ET image collection
+function applyMaskToET(imageCollection, mask, aoi) {
+  return imageCollection
+           .filterBounds(aoi)
+           .filterDate('2022-01-01', '2022-12-31')
+           .sum()  // Sum the monthly ET values
+           .select([0])  // Select the first band
+           .updateMask(mask)  // Apply the cloud-free mask
+           .clip(aoi);
+}
+
+// Step 3: Get cloud-free masks for each model
+var eemetricMask = getCloudFreeMask(ee.ImageCollection("OpenET/EEMETRIC/CONUS/GRIDMET/MONTHLY/v2_0"), aoi);
+var ptjplMask = getCloudFreeMask(ee.ImageCollection("OpenET/PTJPL/CONUS/GRIDMET/MONTHLY/v2_0"), aoi);
+var disalexiMask = getCloudFreeMask(ee.ImageCollection("OpenET/DISALEXI/CONUS/GRIDMET/MONTHLY/v2_0"), aoi);
+var ssebopMask = getCloudFreeMask(ee.ImageCollection("OpenET/SSEBOP/CONUS/GRIDMET/MONTHLY/v2_0"), aoi);
+var geesebalMask = getCloudFreeMask(ee.ImageCollection("OpenET/GEESEBAL/CONUS/GRIDMET/MONTHLY/v2_0"), aoi);
+
+// Step 4: Combine the cloud-free masks from the 5 models
+var combinedMask = eemetricMask.and(ptjplMask)
+                               .and(disalexiMask)
+                               .and(ssebopMask)
+                               .and(geesebalMask);
+
+// Step 5: Apply the combined cloud-free mask to ET data for each model
+var eemetricET = applyMaskToET(ee.ImageCollection("OpenET/EEMETRIC/CONUS/GRIDMET/MONTHLY/v2_0"), combinedMask, aoi);
+var ptjplET = applyMaskToET(ee.ImageCollection("OpenET/PTJPL/CONUS/GRIDMET/MONTHLY/v2_0"), combinedMask, aoi);
+var disalexiET = applyMaskToET(ee.ImageCollection("OpenET/DISALEXI/CONUS/GRIDMET/MONTHLY/v2_0"), combinedMask, aoi);
+var ssebopET = applyMaskToET(ee.ImageCollection("OpenET/SSEBOP/CONUS/GRIDMET/MONTHLY/v2_0"), combinedMask, aoi);
+var geesebalET = applyMaskToET(ee.ImageCollection("OpenET/GEESEBAL/CONUS/GRIDMET/MONTHLY/v2_0"), combinedMask, aoi);
+
+// Step 6: Stack the 5 ET images into a single multi-band image
+var etStack = eemetricET.addBands(ptjplET)
+                        .addBands(disalexiET)
+                        .addBands(ssebopET)
+                        .addBands(geesebalET);
+
+// Step 7: Calculate the median for each pixel across the 5 models
+var etMedian = etStack.reduce(ee.Reducer.median());
+
+// Step 8: Calculate the absolute deviation of each model's ET from the median
+var etAbsoluteDeviation = etStack.subtract(etMedian).abs();
+
+// Step 9: Calculate the Median Absolute Deviation (MAD) for each pixel
+var etMAD = etAbsoluteDeviation.reduce(ee.Reducer.median());
+
+// Step 10: Define the threshold for outliers (1.2 times the MAD)
+var madThreshold = etMAD.multiply(1.2);
+
+// Step 11: Create masks for each band where the deviation is within the threshold
+function maskOutliers(image, median, madThreshold) {
+  var deviation = image.subtract(median).abs();
+  return image.updateMask(deviation.lte(madThreshold));  // Mask pixels with deviation > threshold
+}
+
+// Apply the outlier mask to each ET model
+var eemetricFiltered = maskOutliers(eemetricET, etMedian, madThreshold);
+var ptjplFiltered = maskOutliers(ptjplET, etMedian, madThreshold);
+var disalexiFiltered = maskOutliers(disalexiET, etMedian, madThreshold);
+var ssebopFiltered = maskOutliers(ssebopET, etMedian, madThreshold);
+var geesebalFiltered = maskOutliers(geesebalET, etMedian, madThreshold);
+
+// Step 12: Sum the filtered ET values for all models
+var etSumFiltered = eemetricFiltered.add(ptjplFiltered)
+                                    .add(disalexiFiltered)
+                                    .add(ssebopFiltered)
+                                    .add(geesebalFiltered);
+
+// Step 13: Count the number of valid (unmasked) models for each pixel
+var validCount = eemetricFiltered.unmask(0).gt(0)
+                .add(ptjplFiltered.unmask(0).gt(0))
+                .add(disalexiFiltered.unmask(0).gt(0))
+                .add(ssebopFiltered.unmask(0).gt(0))
+                .add(geesebalFiltered.unmask(0).gt(0));
+
+// Step 14: Calculate the mean ET, considering only unmasked values
+var etMeanFiltered = etSumFiltered.divide(validCount);
+
+
+// Step 15: Load the OpenET Ensemble collection and sum the monthly values for 2023, applying the same combined mask
+var ensembleET = ee.ImageCollection("OpenET/ENSEMBLE/CONUS/GRIDMET/MONTHLY/v2_0")
+                  .filterBounds(aoi)
+                  .filterDate('2023-01-01', '2023-12-31')
+                  .sum()  // Sum the monthly ET values to get the annual value
+                  .select([0])  // Select the first band
+                  .updateMask(combinedMask)  // Apply the same cloud-free mask
+                  .clip(aoi);
+
+// Step 16: Compare the two datasets (difference between average of the 5 models and the Ensemble)
+var etDifference = etMeanFiltered.subtract(ensembleET);
+
+// Step 17: Visualization parameters for ET and difference
+var etVisParams = {
+  min: 300,
+  max: 1700,  // Set appropriate range based on expected ET values
+  palette: ['red', 'orange', 'yellow', 'green', 'blue']  // Color ramp for ET values
+};
+
+var diffVisParams = {
+  min: -200,  // Set appropriate min/max based on expected differences
+  max: 200,
+  palette: ['red', 'white', 'blue']  // Red for negative, blue for positive differences
+};
+
+//Convert to double
+
+eemetricFiltered = eemetricFiltered.toDouble();
+ptjplFiltered = ptjplFiltered.toDouble();
+disalexiFiltered = disalexiFiltered.toDouble();
+ssebopFiltered = ssebopFiltered.toDouble();
+geesebalFiltered = geesebalFiltered.toDouble();
+//ensembleET = ensembleET.toDouble();
+
+// Step 18: Visualize the annual ET and comparison
+
+
+Map.addLayer(eemetricFiltered, etVisParams, 'EEMETRIC ET (Outliers Removed)');
+Map.addLayer(ptjplFiltered, etVisParams, 'PTJPL ET (Outliers Removed)');
+Map.addLayer(disalexiFiltered, etVisParams, 'DISALEXI ET (Outliers Removed)');
+Map.addLayer(ssebopFiltered, etVisParams, 'SSEBOP ET (Outliers Removed)');
+Map.addLayer(geesebalFiltered, etVisParams, 'GEESEBAL ET (Outliers Removed)');
+
+
+// Visualize the mean ET after removing outliers and accounting for unmasked values
+Map.addLayer(etMeanFiltered, etVisParams, 'Mean ET (Outliers Removed, Valid Models Only)');
+
+
+// Visualize the OpenET Ensemble ET
+Map.addLayer(ensembleET, etVisParams, 'OpenET Ensemble ET (2023, Cloud-Free Mask)');
+
+// Visualize the ET difference (optional)
+//Map.addLayer(etDifference, diffVisParams, 'Difference (Mean without Outliers - Ensemble) 2023');
+
+
+// Step 19: Export the rasters to Google Drive
+Export.image.toDrive({
+  image: etDifference,
+  description: 'etDifference',
+  folder: 'Post Oak Savannah ET Project',
+  fileNamePrefix: 'etDifference',
+  region: aoi.geometry().bounds(),
+  scale: 30,  // Set a suitable scale (30m is typical)
+  crs: 'EPSG:3857',  // Set CRS to WGS84
+  maxPixels: 1e13  // Allow a high number of pixels
+});
+
+Export.image.toDrive({
+  image: eemetricFiltered,
+  description: 'eemetricFiltered',
+  folder: 'Post Oak Savannah ET Project',
+  fileNamePrefix: 'eemetricFiltered',
+  region: aoi.geometry().bounds(),
+  scale: 30,  // Set a suitable scale (30m is typical)
+  crs: 'EPSG:3857',  // Set CRS to WGS84
+  maxPixels: 1e13  // Allow a high number of pixels
+});
+
+Export.image.toDrive({
+  image: ptjplFiltered,
+  description: 'ptjplFiltered',
+  folder: 'Post Oak Savannah ET Project',
+  fileNamePrefix: 'ptjplFiltered',
+  region: aoi.geometry().bounds(),
+  scale: 30,  // Set a suitable scale (30m is typical)
+  crs: 'EPSG:3857',  // Set CRS to WGS84
+  maxPixels: 1e13  // Allow a high number of pixels
+});
+
+Export.image.toDrive({
+  image: disalexiFiltered,
+  description: 'disalexiFiltered',
+  folder: 'Post Oak Savannah ET Project',
+  fileNamePrefix: 'disalexiFiltered',
+  region: aoi.geometry().bounds(),
+  scale: 30,  // Set a suitable scale (30m is typical)
+  crs: 'EPSG:3857',  // Set CRS to WGS84
+  maxPixels: 1e13  // Allow a high number of pixels
+});
+
+Export.image.toDrive({
+  image: ssebopFiltered,
+  description: 'ssebopFiltered',
+  folder: 'Post Oak Savannah ET Project',
+  fileNamePrefix: 'ssebopFiltered',
+  region: aoi.geometry().bounds(),
+  scale: 30,  // Set a suitable scale (30m is typical)
+  crs: 'EPSG:3857',  // Set CRS to WGS84
+  maxPixels: 1e13  // Allow a high number of pixels
+});
+
+Export.image.toDrive({
+  image: geesebalFiltered,
+  description: 'geesebalFiltered',
+  folder: 'Post Oak Savannah ET Project',
+  fileNamePrefix: 'geesebalFiltered',
+  region: aoi.geometry().bounds(),
+  scale: 30,  // Set a suitable scale (30m is typical)
+  crs: 'EPSG:3857',  // Set CRS to WGS84
+  maxPixels: 1e13  // Allow a high number of pixels
+});
+
+Export.image.toDrive({
+  image: ensembleET,
+  description: 'ensembleET',
+  folder: 'Post Oak Savannah ET Project',
+  fileNamePrefix: 'ensembleET',
+  region: aoi.geometry().bounds(),
+  scale: 30,  // Set a suitable scale (30m is typical)
+  crs: 'EPSG:3857',  // Set CRS to WGS84
+  maxPixels: 1e13  // Allow a high number of pixels
+});
+
+
+
+
+////
+//// Filter out extreme values
+////
+
+
+
+// Step 1: Load your raster image asset
+var etImage = ee.Image('users/horia/Sebal_POS_2016');
+
+
+// Step 2: Define the Area of Interest (AOI) - East Central Texas Forests Ecoregion
+var ecoregions = ee.FeatureCollection("RESOLVE/ECOREGIONS/2017");
+var aoi = ecoregions.filter(ee.Filter.eq('ECO_NAME', 'East Central Texas forests'));
+Map.centerObject(aoi, 8);
+
+// Step 3: Clip the ET image to the AOI
+var etClipped = etImage.clip(aoi);
+
+// Step 4: Calculate the median and standard deviation across the AOI
+var etStats = etClipped.reduceRegion({
+  reducer: ee.Reducer.median().combine({
+    reducer2: ee.Reducer.stdDev(),
+    sharedInputs: true
+  }),
+  geometry: aoi,
+  scale: 30,
+  maxPixels: 1e9
+});
+
+// Step 5: Extract the median and standard deviation values
+var etMedian = ee.Number(ee.Algorithms.If(etStats.get('et_median'), ee.Number(etStats.get('et_median')), ee.Number(0)));
+var etStdDev = ee.Number(ee.Algorithms.If(etStats.get('et_stdDev'), ee.Number(etStats.get('et_stdDev')), ee.Number(0)));
+
+// Step 6: Calculate the upper and lower thresholds (median +/- 3 * stdDev)
+var upperThreshold = etMedian.add(etStdDev.multiply(3.5));
+var lowerThreshold = etMedian.subtract(etStdDev.multiply(3.5));
+
+// Step 7: Mask values outside the thresholds (flagging outliers)
+var etMasked = etClipped.updateMask(etClipped.gte(lowerThreshold).and(etClipped.lte(upperThreshold)));
+
+// Step 8: Add the filtered ET image to the map
+Map.addLayer(etMasked, {
+  min: lowerThreshold.getInfo(),
+  max: upperThreshold.getInfo(),
+  palette: ['blue', 'white', 'green']
+}, 'Filtered ET (3 StdDev)');
+
+// Step 9: Compute statistics of the filtered raster
+var filteredStats = etMasked.reduceRegion({
+  reducer: ee.Reducer.min().combine({
+    reducer2: ee.Reducer.max(),
+    sharedInputs: true
+  }).combine({
+    reducer2: ee.Reducer.mean(),
+    sharedInputs: true
+  }).combine({
+    reducer2: ee.Reducer.median(),
+    sharedInputs: true
+  }).combine({
+    reducer2: ee.Reducer.stdDev(),
+    sharedInputs: true
+  }),
+  geometry: aoi,
+  scale: 30,
+  maxPixels: 1e9
+});
+
+// Print the resultant statistics
+print('Filtered ET Image Statistics:', filteredStats);
+
+// Step 10: Export the masked ET image to Google Drive
+Export.image.toDrive({
+  image: etMasked,
+  description: 'Filtered_ET_3StdDev_Export',
+  folder: 'Post Oak Savannah ET Project',
+  fileNamePrefix: 'Filtered_ET_3StdDev_EastCentralTexas',
+  region: aoi.geometry().bounds(),
+  scale: 30,
+  maxPixels: 1e9,
+  crs: 'EPSG:3857',
+  fileFormat: 'GeoTIFF'
+});
+
+// Step 11: Convert the statistics dictionary into a FeatureCollection for export
+var statsDict = ee.Feature(null, filteredStats);
+var statsFeatureCollection = ee.FeatureCollection([statsDict]);
+
+
+
+
+////
+//// Get Average
+////
+
+// Define the Area of Interest (AOI)
+var ecoregions = ee.FeatureCollection("RESOLVE/ECOREGIONS/2017");
+var aoi = ecoregions.filter(ee.Filter.eq('ECO_NAME', 'East Central Texas forests'));
+Map.centerObject(aoi, 8);
+
+// Load your five raster images
+var raster1 = ee.Image('projects/ee-horia/assets/DisAlexi_ET');
+var raster2 = ee.Image('projects/ee-horia/assets/Metric_ET');
+var raster3 = ee.Image('projects/ee-horia/assets/PTJP_ET');
+var raster4 = ee.Image('projects/ee-horia/assets/Seebal_ET');
+var raster5 = ee.Image('projects/ee-horia/assets/SSEBOP_ET');
+
+// Create a list of images
+var imageCollection = ee.ImageCollection([raster1, raster2, raster3, raster4, raster5]);
+
+// Function to check if a pixel is valid (non-null)
+function validPixels(image) {
+  return image.mask().neq(0);  // This checks for non-null (valid) pixels
+}
+
+// Sum of the valid images
+var sumOfValid = imageCollection.map(function(image) {
+  return image.unmask(0);  // Replace NoData with 0 for summing
+}).sum();
+
+// Count of valid (non-null) images
+var countValid = imageCollection.map(validPixels).sum();
+
+// Calculate the mean, avoiding NoData
+var average = sumOfValid.divide(countValid);
+
+// Clip the result to the AOI
+var averageClipped = average.clip(aoi);
+
+// Mask out zero values by applying an updateMask
+var averageClippedNoZeros = averageClipped.updateMask(averageClipped.neq(0));
+
+// Set visualization parameters (adjust based on your raster values)
+var visParams = {
+  min: 247,
+  max: 1880,  // Adjust this based on the range of your data
+  palette: ['blue', 'white', 'green']  // Example palette
+};
+
+// Add the average image (clipped and with 0 values masked to null) to the map
+Map.addLayer(averageClippedNoZeros, visParams, 'Average of Rasters with No Zeros');
+
+// Export the average raster to Google Drive, with 0 values replaced by null
+Export.image.toDrive({
+  image: averageClippedNoZeros,
+  description: 'Average',
+  folder: 'Post Oak Savannah ET Project',  // Specify the folder in Google Drive
+  fileNamePrefix: 'Average_Rasters_NoZeros_Clipped',
+  scale: 30,  // Adjust scale as needed
+  maxPixels: 1e12,
+  region: aoi.geometry().bounds(),  // Clipping to AOI
+  crs: 'EPSG:3857',  // Set CRS if needed, default is WGS84
+  fileFormat: 'GeoTIFF'
+});
+
+
