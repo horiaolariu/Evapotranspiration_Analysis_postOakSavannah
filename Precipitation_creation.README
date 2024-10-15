@@ -1,0 +1,398 @@
+README
+Annual Precipitation Analysis in the Post Oak Savannah Ecoregion (2008-2023)
+Author: Horia Olariu
+Table of Contents
+
+    Introduction
+    Prerequisites
+    Setup and Usage Instructions
+    Code Overview
+        Data Sources
+        Processing Steps
+    Output Details
+    Notes and Considerations
+    Troubleshooting
+    Contact Information
+
+Introduction
+
+This script is designed to compute and export annual precipitation data for the East Central Texas Forests ecoregion over the years 2008 to 2023 using Google Earth Engine (GEE). The script performs the following tasks:
+
+    Calculates the total annual precipitation for each year by summing daily precipitation data from the DAYMET dataset.
+    Clips the data to the exact geometry of the East Central Texas Forests ecoregion.
+    Reprojects the data to a specified coordinate reference system (EPSG:3857) with 30-meter resolution.
+    Exports the processed annual precipitation rasters to your GEE assets.
+    Computes summary statistics (min, max, mean, median, standard deviation, 25th percentile, and 75th percentile) for each year's precipitation data.
+    Exports the summary statistics as a CSV file to your Google Drive.
+
+Prerequisites
+
+Before running the script, ensure you have:
+
+    Google Earth Engine Account:
+        Sign up for an account at Google Earth Engine.
+
+    Basic Understanding of GEE:
+        Familiarity with the GEE Code Editor and JavaScript syntax is helpful for modifying and running the script.
+
+    Access to the Required Datasets:
+
+        The script uses publicly available datasets:
+            DAYMET Daily Surface Weather Data: NASA/ORNL/DAYMET_V4
+            RESOLVE Ecoregions 2017: RESOLVE/ECOREGIONS/2017
+
+Setup and Usage Instructions
+Step 1: Access Google Earth Engine Code Editor
+
+    Navigate to the Google Earth Engine Code Editor.
+
+Step 2: Copy the Script
+
+    // Define the area of interest (aoi) as the East Central Texas Forests ecoregion
+var resolveEcoregions = ee.FeatureCollection("RESOLVE/ECOREGIONS/2017");
+var eastCentralTexasForests = resolveEcoregions.filter(ee.Filter.eq('ECO_NAME', 'East Central Texas forests'));
+
+// Get the exact geometry of the East Central Texas Forests ecoregion
+var aoiGeometry = eastCentralTexasForests.geometry();  // Use this geometry for clipping and export
+
+// Define the years of interest
+var years = ee.List.sequence(2008, 2023);
+
+// Load the DAYMET dataset
+var daymetDataset = ee.ImageCollection('NASA/ORNL/DAYMET_V4')
+              .filterBounds(aoiGeometry)
+              .select('prcp');  // Select only precipitation data
+
+// Create an empty FeatureCollection to store the statistics for each year
+var statsCollection = ee.FeatureCollection([]);
+
+// Define a function to compute summary statistics for each year's precipitation
+function getStats(image, geometry, year) {
+  var stats = image.reduceRegion({
+    reducer: ee.Reducer.min()
+              .combine(ee.Reducer.max(), '', true)
+              .combine(ee.Reducer.mean(), '', true)
+              .combine(ee.Reducer.median(), '', true)
+              .combine(ee.Reducer.stdDev(), '', true)
+              .combine(ee.Reducer.percentile([25]), '', true)  // Q1
+              .combine(ee.Reducer.percentile([75]), '', true), // Q3
+    geometry: geometry,
+    scale: 30,
+    maxPixels: 1e13,
+    bestEffort: true
+  });
+
+  // Convert the statistics into a Feature with properties
+  var statsFeature = ee.Feature(null, {
+    'year': year,
+    'min': stats.get('prcp_min'),
+    'max': stats.get('prcp_max'),
+    'mean': stats.get('prcp_mean'),
+    'median': stats.get('prcp_median'),
+    'stdDev': stats.get('prcp_stdDev'),
+    'Q1': stats.get('prcp_p25'),
+    'Q3': stats.get('prcp_p75')
+  });
+
+  // Append the Feature to the FeatureCollection
+  statsCollection = statsCollection.merge(ee.FeatureCollection([statsFeature]));
+}
+
+// Loop through each year, calculate statistics, and export both raster and statistics
+years.getInfo().forEach(function(year) {
+  // Filter DAYMET collection for the entire year (January 1 to December 31)
+  var daymetYear = daymetDataset
+    .filterDate(ee.Date.fromYMD(year, 1, 1), ee.Date.fromYMD(year, 12, 31))
+    .sum();  // Calculate the sum of precipitation for the entire year
+
+  // Clip to the exact geometry of the area of interest
+  var clipped = daymetYear.clip(aoiGeometry);
+
+  // Reproject to EPSG:3857 with 30-meter resolution
+  var reprojected = clipped.reproject({
+    crs: 'EPSG:3857',
+    scale: 30  // Use 30-meter scale to resample the image
+  });
+
+  // Export the processed image (raster) to the user's Google Earth Engine assets using the exact geometry
+  var description = 'Precipitation_' + year;
+  Export.image.toAsset({
+    image: reprojected,
+    description: description,
+    assetId: description,  // Replace with your GEE username or folder path if needed
+    region: aoiGeometry,   // Use the exact geometry for export
+    scale: 30,
+    crs: 'EPSG:3857',
+    maxPixels: 1e13
+  });
+
+  // Compute and collect the summary statistics for this year
+  getStats(clipped, aoiGeometry, year);
+  
+  // Print a message indicating the export has been started
+  print('Exporting Annual Precipitation image for the year:', year);
+});
+
+// Export the statistics as a CSV file to Google Drive
+Export.table.toDrive({
+  collection: statsCollection,
+  description: 'Precipitation_Statistics_East_Central_Texas_Forests',
+  fileFormat: 'CSV'
+});
+
+// Center the map on the area of interest for visualization
+Map.centerObject(eastCentralTexasForests, 7);
+
+// Display a message to indicate the script has finished setting up the exports
+print('All exports have been initiated.');
+
+
+
+
+Step 3: Adjust Parameters (Optional)
+
+    Years of Interest:
+
+        The script processes years from 2008 to 2023 by default.
+
+        To modify the range, adjust the years variable:
+
+        javascript
+
+    var years = ee.List.sequence(startYear, endYear);
+
+Coordinate Reference System and Scale:
+
+    The script reprojects images to EPSG:3857 with a scale of 30 meters.
+    Adjust the crs and scale parameters in the reproject and Export functions if needed.
+
+Asset Export Path:
+
+    Modify the assetId parameter in the Export.image.toAsset function to specify your GEE username or desired folder path:
+
+    javascript
+
+        assetId: 'users/your_username/Precipitation_' + year,
+
+Step 4: Run the Script
+
+    Click the Run button (▶️) at the top of the Code Editor.
+
+Step 5: Monitor the Exports
+
+    The script initiates export tasks for each year's precipitation raster and a single task for the statistics CSV file.
+    In the Tasks tab on the right panel, you will see these tasks.
+    Click Run next to each task to start the export process.
+
+Step 6: Access Exported Data
+
+    Annual Precipitation Rasters:
+        The rasters are exported to your GEE Assets under the names Precipitation_YYYY, where YYYY is the year.
+
+    Summary Statistics CSV:
+        The CSV file is exported to your Google Drive with the description Precipitation_Statistics_East_Central_Texas_Forests.
+
+Code Overview
+Data Sources
+
+    DAYMET Daily Surface Weather Data (Version 4):
+        Dataset ID: NASA/ORNL/DAYMET_V4
+        Provides daily gridded estimates of various weather parameters, including precipitation.
+
+    RESOLVE Ecoregions 2017:
+        Dataset ID: RESOLVE/ECOREGIONS/2017
+        A global dataset of ecoregions used to define the area of interest.
+
+Processing Steps
+1. Define the Area of Interest (AOI)
+
+javascript
+
+var resolveEcoregions = ee.FeatureCollection("RESOLVE/ECOREGIONS/2017");
+var eastCentralTexasForests = resolveEcoregions.filter(ee.Filter.eq('ECO_NAME', 'East Central Texas forests'));
+var aoiGeometry = eastCentralTexasForests.geometry();
+
+    Action:
+        Loads the RESOLVE Ecoregions dataset and filters it to select the East Central Texas Forests ecoregion.
+        Extracts the exact geometry of the ecoregion for clipping and export.
+
+2. Define the Years of Interest
+
+javascript
+
+var years = ee.List.sequence(2008, 2023);
+
+    Action:
+        Creates a list of years from 2008 to 2023 to loop over.
+
+3. Load the DAYMET Dataset
+
+javascript
+
+var daymetDataset = ee.ImageCollection('NASA/ORNL/DAYMET_V4')
+                  .filterBounds(aoiGeometry)
+                  .select('prcp');
+
+    Action:
+        Loads the DAYMET dataset and filters it to the area of interest.
+        Selects only the precipitation (prcp) band.
+
+4. Initialize an Empty FeatureCollection for Statistics
+
+javascript
+
+var statsCollection = ee.FeatureCollection([]);
+
+    Purpose:
+        To store the summary statistics for each year.
+
+5. Define a Function to Compute Summary Statistics
+
+javascript
+
+function getStats(image, geometry, year) {
+  // Compute statistics...
+  // Create a Feature with the statistics...
+  // Append the Feature to the statsCollection...
+}
+
+    Action:
+        Computes min, max, mean, median, standard deviation, 25th percentile (Q1), and 75th percentile (Q3) for the input image.
+        Creates a Feature with these statistics and the year.
+        Merges the Feature into the statsCollection.
+
+6. Loop Through Each Year
+
+javascript
+
+years.getInfo().forEach(function(year) {
+  // Filter DAYMET data for the year...
+  // Sum the precipitation over the year...
+  // Clip and reproject the image...
+  // Export the raster to GEE Assets...
+  // Compute and collect statistics...
+  // Print export initiation message...
+});
+
+    Actions:
+        Filter and Sum Data:
+            Filters the DAYMET dataset for each year and sums daily precipitation to get annual precipitation.
+        Clip and Reproject:
+            Clips the data to the AOI geometry.
+            Reprojects the image to EPSG:3857 with 30-meter resolution.
+        Export Raster:
+            Exports the reprojected image to GEE Assets with the description Precipitation_YYYY.
+        Compute Statistics:
+            Calls getStats to compute and collect statistics for the year.
+        Print Message:
+            Indicates that the export has been initiated for the year.
+
+7. Export the Statistics as a CSV File
+
+javascript
+
+Export.table.toDrive({
+  collection: statsCollection,
+  description: 'Precipitation_Statistics_East_Central_Texas_Forests',
+  fileFormat: 'CSV'
+});
+
+    Action:
+        Exports the statsCollection containing statistics for all years to Google Drive as a CSV file.
+
+8. Visualization and Completion Message
+
+javascript
+
+Map.centerObject(eastCentralTexasForests, 7);
+print('All exports have been initiated.');
+
+    Action:
+        Centers the map view on the area of interest.
+        Prints a message indicating that all exports have been initiated.
+
+Output Details
+Annual Precipitation Rasters
+
+    Location:
+        Exported to your GEE Assets.
+    Naming Convention:
+        Precipitation_YYYY (e.g., Precipitation_2008)
+    Details:
+        Contains the total annual precipitation for each year.
+        Clipped to the exact geometry of the East Central Texas Forests ecoregion.
+        Reprojected to EPSG:3857 with 30-meter resolution.
+
+Summary Statistics CSV
+
+    Location:
+        Exported to your Google Drive.
+    File Name:
+        Precipitation_Statistics_East_Central_Texas_Forests.csv
+    Contents:
+        Yearly statistics including:
+            Year
+            Minimum precipitation
+            Maximum precipitation
+            Mean precipitation
+            Median precipitation
+            Standard deviation
+            25th percentile (Q1)
+            75th percentile (Q3)
+
+Notes and Considerations
+
+    Asset IDs:
+
+        The assetId parameter in the Export.image.toAsset function is set to description.
+
+        Replace 'Precipitation_' + year with your GEE username or folder path if needed:
+
+        javascript
+
+        assetId: 'users/your_username/Precipitation_' + year,
+
+    Export Limitations:
+        GEE has limitations on the number of concurrent export tasks.
+        If you have many years to process, you may need to start exports in batches.
+
+    Computation Limits:
+        The maxPixels parameter is set to 1e13 to accommodate large images.
+        If you encounter errors related to pixel limits, you may need to adjust the scale or region size.
+
+    Processing Time:
+        Export tasks may take some time to complete, depending on the size of the AOI and the number of years processed.
+
+    Data Resolution:
+        DAYMET data has a native resolution of approximately 1 km.
+        Reprojecting to 30 meters does not increase the data resolution but aligns it with other datasets that may be at 30-meter resolution.
+
+    Data Accuracy:
+        Be aware of the inherent uncertainties in gridded climate datasets like DAYMET.
+        The data should be used accordingly, considering its limitations.
+
+Troubleshooting
+
+    Export Errors:
+        Ensure that you have sufficient storage space in your GEE Assets and Google Drive.
+        Check for any typos or incorrect paths in the assetId or export parameters.
+
+    Permission Issues:
+        Verify that your GEE account has the necessary permissions to write to the specified asset location.
+
+    Script Errors:
+        If the script fails, check the console for error messages.
+        Ensure that all datasets are correctly loaded and accessible.
+
+    Adjusting for Large Regions:
+        For larger regions or higher resolutions, consider increasing the maxPixels parameter or reducing the scale.
+
+Contact Information
+
+If you have questions or need assistance, please contact:
+
+    Name: Horia Olariu
+    Email: horia@tamu.edu
+    Affiliation: Texas A&M University - ECCB
+
+Disclaimer: This script and documentation are provided "as is" without warranty of any kind. The user assumes all responsibility for any issues arising from the use of this script.
