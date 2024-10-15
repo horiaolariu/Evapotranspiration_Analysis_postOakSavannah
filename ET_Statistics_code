@@ -1,0 +1,228 @@
+// Step 1: Define the Area of Interest (AOI) - East Central Texas Forests Ecoregion
+var ecoregions = ee.FeatureCollection("RESOLVE/ECOREGIONS/2017");
+var aoi = ecoregions.filter(ee.Filter.eq('ECO_NAME', 'East Central Texas forests'));
+
+// Step 2: Define the years to loop over
+var startYear = 2008;
+var endYear = 2023;
+var years = ee.List.sequence(startYear, endYear);
+
+// Step 3: Define land cover classes of interest
+var landcoverClasses = {
+  31: 'Barren Land',
+  41: 'Deciduous Forest',
+  42: 'Evergreen Forest',
+  43: 'Mixed Forest',
+  52: 'Shrubland',
+  71: 'Grassland',
+  81: 'Pasture',
+  82: 'Cultivated Crops',
+  90: 'Woody Wetlands',
+  95: 'Herbaceous Wetlands'
+};
+
+// Step 4: Define soil groups of interest
+var soilGroups = {
+  31: 'Paleustalfs',
+  30: 'Paleudalfs',
+  272: 'Argiustolls',
+  419: 'Hapluderts',
+  18: 'Hapludalfs'
+};
+
+// Step 5: Load the soil dataset once and get the band name
+var soils = ee.Image('OpenLandMap/SOL/SOL_GRTGROUP_USDA-SOILTAX_C/v01').clip(aoi);
+var soilsBandName = ee.String(soils.bandNames().get(0));
+
+// Step 6: Initialize an empty list to collect results
+var resultsList = [];
+
+// Step 7: Loop over each year
+years.getInfo().forEach(function(year) {
+  // Convert year to integer
+  year = parseInt(year);
+  
+  // Load the ET image for the current year
+  var etImagePath = 'projects/horia-olariu/assets/Average_ET_' + year;
+  var etImage = ee.Image(etImagePath).clip(aoi);
+  
+  // Rename the ET image band to 'ET' for consistency
+  etImage = etImage.rename('ET');
+  
+  // Determine the appropriate NLCD year based on the ET image year
+  var nlcdCollection;
+  var nlcdIndex;
+  
+  if (year <= 2009) {
+    nlcdCollection = ee.ImageCollection("USGS/NLCD_RELEASES/2019_REL/NLCD");
+    nlcdIndex = '2008';
+  } else if (year <= 2011) {
+    nlcdCollection = ee.ImageCollection("USGS/NLCD_RELEASES/2019_REL/NLCD");
+    nlcdIndex = '2011';
+  } else if (year <= 2014) {
+    nlcdCollection = ee.ImageCollection("USGS/NLCD_RELEASES/2019_REL/NLCD");
+    nlcdIndex = '2013';
+  } else if (year <= 2017) {
+    nlcdCollection = ee.ImageCollection("USGS/NLCD_RELEASES/2019_REL/NLCD");
+    nlcdIndex = '2016';
+  } else if (year <= 2020) {
+    nlcdCollection = ee.ImageCollection("USGS/NLCD_RELEASES/2019_REL/NLCD");
+    nlcdIndex = '2019';
+  } else {
+    nlcdCollection = ee.ImageCollection("USGS/NLCD_RELEASES/2021_REL/NLCD");
+    nlcdIndex = '2021';
+  }
+  
+  // Import the appropriate NLCD collection and filter it for the chosen year
+  var nlcdYear = nlcdCollection.filter(ee.Filter.eq('system:index', nlcdIndex)).first();
+  
+  // Select the landcover band and clip it to the AOI
+  var landcover = nlcdYear.select('landcover').clip(aoi);
+  var landcoverBandName = 'landcover';  // Since we selected 'landcover' band
+  
+  // Step 8: Iterate through each land cover class and compute statistics
+  Object.keys(landcoverClasses).forEach(function(classValue) {
+    var classInt = parseInt(classValue, 10);
+    var landcoverMask = landcover.eq(classInt);
+    
+    // Apply the mask to the `Average_ET` raster
+    var maskedEt = etImage.updateMask(landcoverMask);
+    
+    // Compute statistics for the `Average_ET` values within this class
+    var stats = maskedEt.reduceRegion({
+      reducer: ee.Reducer.min().combine({
+        reducer2: ee.Reducer.max(),
+        sharedInputs: true
+      }).combine({
+        reducer2: ee.Reducer.mean(),
+        sharedInputs: true
+      }).combine({
+        reducer2: ee.Reducer.median(),
+        sharedInputs: true
+      }).combine({
+        reducer2: ee.Reducer.stdDev(),
+        sharedInputs: true
+      }).combine({
+        reducer2: ee.Reducer.percentile([25, 75]),
+        sharedInputs: true
+      }).combine({
+        reducer2: ee.Reducer.count(),
+        sharedInputs: true
+      }),
+      geometry: aoi,
+      scale: 30,
+      maxPixels: 1e13
+    });
+    
+    // Compute the area of the land cover class in square kilometers
+    var area = landcoverMask.multiply(ee.Image.pixelArea()).reduceRegion({
+      reducer: ee.Reducer.sum(),
+      geometry: aoi,
+      scale: 30,
+      maxPixels: 1e13
+    }).get(landcoverBandName);
+    var areaSqKm = ee.Number(area).divide(1e6);
+    
+    // Create a feature with the statistics and area
+    var feature = ee.Feature(null, {
+      'Year': year,
+      'LandCoverClass': landcoverClasses[classValue],
+      'LandCoverValue': classInt,
+      'SoilGroup': 'All',
+      'SoilValue': 'All',
+      'Min_ET': stats.get('ET_min'),
+      'Max_ET': stats.get('ET_max'),
+      'Mean_ET': stats.get('ET_mean'),
+      'Median_ET': stats.get('ET_median'),
+      'StdDev_ET': stats.get('ET_stdDev'),
+      'Percentile25_ET': stats.get('ET_p25'),
+      'Percentile75_ET': stats.get('ET_p75'),
+      'PixelCount': stats.get('ET_count'),
+      'AreaSqKm': areaSqKm
+    });
+    
+    // Add the feature to the results list
+    resultsList.push(feature);
+    
+    // Step 9: Iterate through each soil group
+    Object.keys(soilGroups).forEach(function(soilValue) {
+      var soilInt = parseInt(soilValue, 10);
+      var soilMask = soils.eq(soilInt);
+      
+      // Combine the landcover and soil masks
+      var combinedMask = landcoverMask.and(soilMask);
+      
+      // Apply the combined mask to the `Average_ET` raster
+      var combinedEt = etImage.updateMask(combinedMask);
+      
+      // Compute statistics for the combined mask
+      var combinedStats = combinedEt.reduceRegion({
+        reducer: ee.Reducer.min().combine({
+          reducer2: ee.Reducer.max(),
+          sharedInputs: true
+        }).combine({
+          reducer2: ee.Reducer.mean(),
+          sharedInputs: true
+        }).combine({
+          reducer2: ee.Reducer.median(),
+          sharedInputs: true
+        }).combine({
+          reducer2: ee.Reducer.stdDev(),
+          sharedInputs: true
+        }).combine({
+          reducer2: ee.Reducer.percentile([25, 75]),
+          sharedInputs: true
+        }).combine({
+          reducer2: ee.Reducer.count(),
+          sharedInputs: true
+        }),
+        geometry: aoi,
+        scale: 30,
+        maxPixels: 1e13
+      });
+      
+      // Compute the area of the combined land cover and soil group
+      var combinedArea = combinedMask.multiply(ee.Image.pixelArea()).reduceRegion({
+        reducer: ee.Reducer.sum(),
+        geometry: aoi,
+        scale: 30,
+        maxPixels: 1e13
+      }).get(landcoverBandName);  // Use landcover band name
+      var combinedAreaSqKm = ee.Number(combinedArea).divide(1e6);
+      
+      // Create a feature with the combined statistics
+      var combinedFeature = ee.Feature(null, {
+        'Year': year,
+        'LandCoverClass': landcoverClasses[classValue],
+        'LandCoverValue': classInt,
+        'SoilGroup': soilGroups[soilValue],
+        'SoilValue': soilInt,
+        'Min_ET': combinedStats.get('ET_min'),
+        'Max_ET': combinedStats.get('ET_max'),
+        'Mean_ET': combinedStats.get('ET_mean'),
+        'Median_ET': combinedStats.get('ET_median'),
+        'StdDev_ET': combinedStats.get('ET_stdDev'),
+        'Percentile25_ET': combinedStats.get('ET_p25'),
+        'Percentile75_ET': combinedStats.get('ET_p75'),
+        'PixelCount': combinedStats.get('ET_count'),
+        'AreaSqKm': combinedAreaSqKm
+      });
+      
+      // Add the combined feature to the results list
+      resultsList.push(combinedFeature);
+    });
+  });
+});
+
+// Step 10: Create a FeatureCollection from the results list
+var resultsFC = ee.FeatureCollection(resultsList);
+
+// Step 11: Export the results as a CSV file
+Export.table.toDrive({
+  collection: resultsFC,
+  description: 'ET_Statistics_2008_2023',
+  fileFormat: 'CSV'
+});
+
+// Optional: Print the results to the console (may be large)
+print('Results FeatureCollection:', resultsFC);
