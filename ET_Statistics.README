@@ -1,0 +1,559 @@
+# README
+
+## Evapotranspiration (ET) Statistics by Land Cover and Soil Group in Post Oak Savannah Ecoregion (2008-2023)
+
+### Author: Horia Olariu
+
+---
+
+## Table of Contents
+
+- [Introduction]
+- [Prerequisites]
+- [Setup and Usage Instructions]
+- [Code Overview]
+- [Output Details]
+- [Notes and Considerations]
+- [Troubleshooting]
+- [Contact Information]
+
+---
+
+## Introduction
+
+This script is designed to compute statistical summaries of **Average Evapotranspiration (ET)** values across different **land cover classes** and **soil groups** within the **Post Oak Savannah ecoregion** for the years **2008 to 2023**. The analysis leverages the capabilities of **Google Earth Engine (GEE)** to process large geospatial datasets efficiently.
+
+**Key Objectives:**
+
+- Compute ET statistics (minimum, maximum, mean, median, standard deviation, percentiles) for specified land cover classes.
+- Further analyze ET statistics within combinations of land cover classes and soil groups.
+- Compute the total area in (sq km) for each landcover class and landcover class/soil group combination.
+- Export the compiled results as a CSV file for further analysis and visualization.
+
+---
+
+## Prerequisites
+
+Before running the script, ensure you have the following:
+
+1. **Google Earth Engine Account: **
+
+   - Sign up for an account at [Google Earth Engine](https://earthengine.google.com/).
+
+2. **Access to Average ET Images: **
+
+   - Average ET images for each year from **2008 to 2023**.
+   - Images should be stored in your GEE assets at `'projects/horia-olariu/assets/Average_ET_YYYY'`, where `YYYY` is the year.
+   - Raster datasets are published and available for use
+
+3. **Basic Understanding of GEE:**
+
+   - Familiarity with the GEE Code Editor and JavaScript syntax is helpful for modifying and running the script.
+
+---
+
+## Setup and Usage Instructions
+
+### Step 1: Access Google Earth Engine Code Editor
+
+- Navigate to the [Google Earth Engine Code Editor](https://code.earthengine.google.com/).
+
+### Step 2: Copy the Script
+
+- Copy the entire script provided below into the Code Editor:
+
+
+// // Step 1: Define the Area of Interest (AOI) - East Central Texas Forests Ecoregion
+var ecoregions = ee.FeatureCollection("RESOLVE/ECOREGIONS/2017");
+var aoi = ecoregions.filter(ee.Filter.eq('ECO_NAME', 'East Central Texas forests'));
+
+// Step 2: Define the years to loop over
+var startYear = 2008;
+var endYear = 2023;
+var years = ee.List.sequence(startYear, endYear);
+
+// Step 3: Define land cover classes of interest
+var landcoverClasses = {
+  31: 'Barren Land',
+  41: 'Deciduous Forest',
+  42: 'Evergreen Forest',
+  43: 'Mixed Forest',
+  52: 'Shrubland',
+  71: 'Grassland',
+  81: 'Pasture',
+  82: 'Cultivated Crops',
+  90: 'Woody Wetlands',
+  95: 'Herbaceous Wetlands'
+};
+
+// Step 4: Define soil groups of interest
+var soilGroups = {
+  31: 'Paleustalfs',
+  30: 'Paleudalfs',
+  272: 'Argiustolls',
+  419: 'Hapluderts',
+  18: 'Hapludalfs'
+};
+
+// Step 5: Load the soil dataset once and get the band name
+var soils = ee.Image('OpenLandMap/SOL/SOL_GRTGROUP_USDA-SOILTAX_C/v01').clip(aoi);
+var soilsBandName = ee.String(soils.bandNames().get(0));
+
+// Step 6: Initialize an empty list to collect results
+var resultsList = [];
+
+// Step 7: Loop over each year
+years.getInfo().forEach(function(year) {
+  // Convert year to integer
+  year = parseInt(year);
+  
+  // Load the ET image for the current year
+  var etImagePath = 'projects/horia-olariu/assets/Average_ET_' + year;
+  var etImage = ee.Image(etImagePath).clip(aoi);
+  
+  // Rename the ET image band to 'ET' for consistency
+  etImage = etImage.rename('ET');
+  
+  // Determine the appropriate NLCD year based on the ET image year
+  var nlcdCollection;
+  var nlcdIndex;
+  
+  if (year <= 2009) {
+    nlcdCollection = ee.ImageCollection("USGS/NLCD_RELEASES/2019_REL/NLCD");
+    nlcdIndex = '2008';
+  } else if (year <= 2011) {
+    nlcdCollection = ee.ImageCollection("USGS/NLCD_RELEASES/2019_REL/NLCD");
+    nlcdIndex = '2011';
+  } else if (year <= 2014) {
+    nlcdCollection = ee.ImageCollection("USGS/NLCD_RELEASES/2019_REL/NLCD");
+    nlcdIndex = '2013';
+  } else if (year <= 2017) {
+    nlcdCollection = ee.ImageCollection("USGS/NLCD_RELEASES/2019_REL/NLCD");
+    nlcdIndex = '2016';
+  } else if (year <= 2020) {
+    nlcdCollection = ee.ImageCollection("USGS/NLCD_RELEASES/2019_REL/NLCD");
+    nlcdIndex = '2019';
+  } else {
+    nlcdCollection = ee.ImageCollection("USGS/NLCD_RELEASES/2021_REL/NLCD");
+    nlcdIndex = '2021';
+  }
+  
+  // Import the appropriate NLCD collection and filter it for the chosen year
+  var nlcdYear = nlcdCollection.filter(ee.Filter.eq('system:index', nlcdIndex)).first();
+  
+  // Select the landcover band and clip it to the AOI
+  var landcover = nlcdYear.select('landcover').clip(aoi);
+  var landcoverBandName = 'landcover';  // Since we selected 'landcover' band
+  
+  // Step 8: Iterate through each land cover class and compute statistics
+  Object.keys(landcoverClasses).forEach(function(classValue) {
+    var classInt = parseInt(classValue, 10);
+    var landcoverMask = landcover.eq(classInt);
+    
+    // Apply the mask to the `Average_ET` raster
+    var maskedEt = etImage.updateMask(landcoverMask);
+    
+    // Compute statistics for the `Average_ET` values within this class
+    var stats = maskedEt.reduceRegion({
+      reducer: ee.Reducer.min().combine({
+        reducer2: ee.Reducer.max(),
+        sharedInputs: true
+      }).combine({
+        reducer2: ee.Reducer.mean(),
+        sharedInputs: true
+      }).combine({
+        reducer2: ee.Reducer.median(),
+        sharedInputs: true
+      }).combine({
+        reducer2: ee.Reducer.stdDev(),
+        sharedInputs: true
+      }).combine({
+        reducer2: ee.Reducer.percentile([25, 75]),
+        sharedInputs: true
+      }).combine({
+        reducer2: ee.Reducer.count(),
+        sharedInputs: true
+      }),
+      geometry: aoi,
+      scale: 30,
+      maxPixels: 1e13
+    });
+    
+    // Compute the area of the land cover class in square kilometers
+    var area = landcoverMask.multiply(ee.Image.pixelArea()).reduceRegion({
+      reducer: ee.Reducer.sum(),
+      geometry: aoi,
+      scale: 30,
+      maxPixels: 1e13
+    }).get(landcoverBandName);
+    var areaSqKm = ee.Number(area).divide(1e6);
+    
+    // Create a feature with the statistics and area
+    var feature = ee.Feature(null, {
+      'Year': year,
+      'LandCoverClass': landcoverClasses[classValue],
+      'LandCoverValue': classInt,
+      'SoilGroup': 'All',
+      'SoilValue': 'All',
+      'Min_ET': stats.get('ET_min'),
+      'Max_ET': stats.get('ET_max'),
+      'Mean_ET': stats.get('ET_mean'),
+      'Median_ET': stats.get('ET_median'),
+      'StdDev_ET': stats.get('ET_stdDev'),
+      'Percentile25_ET': stats.get('ET_p25'),
+      'Percentile75_ET': stats.get('ET_p75'),
+      'PixelCount': stats.get('ET_count'),
+      'AreaSqKm': areaSqKm
+    });
+    
+    // Add the feature to the results list
+    resultsList.push(feature);
+    
+    // Step 9: Iterate through each soil group
+    Object.keys(soilGroups).forEach(function(soilValue) {
+      var soilInt = parseInt(soilValue, 10);
+      var soilMask = soils.eq(soilInt);
+      
+      // Combine the landcover and soil masks
+      var combinedMask = landcoverMask.and(soilMask);
+      
+      // Apply the combined mask to the `Average_ET` raster
+      var combinedEt = etImage.updateMask(combinedMask);
+      
+      // Compute statistics for the combined mask
+      var combinedStats = combinedEt.reduceRegion({
+        reducer: ee.Reducer.min().combine({
+          reducer2: ee.Reducer.max(),
+          sharedInputs: true
+        }).combine({
+          reducer2: ee.Reducer.mean(),
+          sharedInputs: true
+        }).combine({
+          reducer2: ee.Reducer.median(),
+          sharedInputs: true
+        }).combine({
+          reducer2: ee.Reducer.stdDev(),
+          sharedInputs: true
+        }).combine({
+          reducer2: ee.Reducer.percentile([25, 75]),
+          sharedInputs: true
+        }).combine({
+          reducer2: ee.Reducer.count(),
+          sharedInputs: true
+        }),
+        geometry: aoi,
+        scale: 30,
+        maxPixels: 1e13
+      });
+      
+      // Compute the area of the combined land cover and soil group
+      var combinedArea = combinedMask.multiply(ee.Image.pixelArea()).reduceRegion({
+        reducer: ee.Reducer.sum(),
+        geometry: aoi,
+        scale: 30,
+        maxPixels: 1e13
+      }).get(landcoverBandName);  // Use landcover band name
+      var combinedAreaSqKm = ee.Number(combinedArea).divide(1e6);
+      
+      // Create a feature with the combined statistics
+      var combinedFeature = ee.Feature(null, {
+        'Year': year,
+        'LandCoverClass': landcoverClasses[classValue],
+        'LandCoverValue': classInt,
+        'SoilGroup': soilGroups[soilValue],
+        'SoilValue': soilInt,
+        'Min_ET': combinedStats.get('ET_min'),
+        'Max_ET': combinedStats.get('ET_max'),
+        'Mean_ET': combinedStats.get('ET_mean'),
+        'Median_ET': combinedStats.get('ET_median'),
+        'StdDev_ET': combinedStats.get('ET_stdDev'),
+        'Percentile25_ET': combinedStats.get('ET_p25'),
+        'Percentile75_ET': combinedStats.get('ET_p75'),
+        'PixelCount': combinedStats.get('ET_count'),
+        'AreaSqKm': combinedAreaSqKm
+      });
+      
+      // Add the combined feature to the results list
+      resultsList.push(combinedFeature);
+    });
+  });
+});
+
+// Step 10: Create a FeatureCollection from the results list
+var resultsFC = ee.FeatureCollection(resultsList);
+
+// Step 11: Export the results as a CSV file
+Export.table.toDrive({
+  collection: resultsFC,
+  description: 'ET_Statistics_2008_2023',
+  fileFormat: 'CSV'
+});
+
+// Optional: Print the results to the console (may be large)
+print('Results FeatureCollection:', resultsFC);
+
+
+### Step 3: Verify Asset Accessibility
+
+- Ensure that the ET images for each year are correctly named and stored in your GEE assets at `'projects/horia-olariu/assets/Average_ET_YYYY'`.
+- If your images are stored elsewhere, update the `etImagePath` variable in the script accordingly:
+
+  ```javascript
+  var etImagePath = 'your_asset_path/Average_ET_' + year;
+  ```
+
+### Step 4: Modify Parameters (Optional)
+
+- **Years:**
+  - By default, the script processes years from **2008 to 2023**.
+  - To change the range, modify the `startYear` and `endYear` variables:
+
+    ```javascript
+    var startYear = 2008;
+    var endYear = 2023;
+    ```
+
+- **Land Cover Classes:**
+  - The script focuses on specific NLCD land cover classes.
+  - To add or remove classes, modify the `landcoverClasses` object:
+
+    ```javascript
+    var landcoverClasses = {
+      31: 'Barren Land',
+      41: 'Deciduous Forest',
+      42: 'Evergreen Forest',
+      43: 'Mixed Forest',
+      52: 'Shrubland',
+      71: 'Grassland',
+      81: 'Pasture',
+      82: 'Cultivated Crops',
+      90: 'Woody Wetlands',
+      95: 'Herbaceous Wetlands'
+      // Add or remove classes as needed
+    };
+    ```
+
+- **Soil Groups:**
+  - The script includes the top five soil groups in the region.
+  - To adjust, modify the `soilGroups` object:
+
+    ```javascript
+    var soilGroups = {
+      31: 'Paleustalfs',
+      30: 'Paleudalfs',
+      272: 'Argiustolls',
+      419: 'Hapluderts',
+      18: 'Hapludalfs',
+      // Add or remove soil groups as needed
+    };
+    ```
+
+### Step 5: Run the Script
+
+- Click the **Run** button (▶️) at the top of the Code Editor.
+- Monitor the **Console** and **Tasks** tabs for progress and any messages.
+
+### Step 6: Monitor the Export Task
+
+- The script will initiate an export task to save the results as a CSV file to your Google Drive.
+- In the **Tasks** tab, you'll see the task named `'ET_Statistics_2008_2023'` (or the years you specified).
+- Click **Run** next to the task if it doesn't start automatically.
+
+### Step 7: Download the CSV File
+
+- Once the export is complete, access your Google Drive.
+- The CSV file will be located in the root directory or the specified folder.
+- Download the CSV file for analysis.
+
+---
+
+## Code Overview
+
+The script performs the following main steps:
+
+### 1. Define the Area of Interest (AOI)
+
+- Uses the RESOLVE Ecoregions dataset to select the **East Central Texas forests** ecoregion.
+- Variable: `aoi`
+
+### 2. Define the Years to Process
+
+- Creates a list of years from `startYear` to `endYear`.
+- Variable: `years`
+
+### 3. Define Land Cover Classes and Soil Groups
+
+- Specifies the NLCD land cover classes and soil groups of interest.
+- Variables: `landcoverClasses`, `soilGroups`
+
+### 4. Load Soil Data
+
+- Loads the soil dataset from OpenLandMap and clips it to the AOI.
+- Variable: `soils`
+
+### 5. Initialize Results Collection
+
+- Initializes an empty list `resultsList` to store results.
+
+### 6. Loop Over Each Year
+
+For each year in `years`:
+
+- **Load ET Image:**
+  - Loads the Average ET image for the year and renames its band to `'ET'`.
+
+- **Determine NLCD Year:**
+  - Matches the ET image year to the appropriate NLCD dataset year.
+
+- **Load Land Cover Data:**
+  - Loads the NLCD land cover data for the determined year and clips it to the AOI.
+
+### 7. Compute Statistics for Each Land Cover Class
+
+For each land cover class:
+
+- **Create Mask:**
+  - Masks the land cover image to isolate the current class.
+
+- **Apply Mask to ET Image:**
+  - Masks the ET image to include only areas of the current land cover class.
+
+- **Compute Statistics:**
+  - Calculates ET statistics using `reduceRegion` with combined reducers.
+  - Computes the total area of the land cover class within the AOI.
+
+- **Store Results:**
+  - Creates an `ee.Feature` with the computed statistics and adds it to `resultsList`.
+
+### 8. Compute Statistics for Land Cover and Soil Group Combinations
+
+For each soil group:
+
+- **Create Soil Mask:**
+  - Masks the soil image to isolate the current soil group.
+
+- **Combine Masks:**
+  - Combines the land cover and soil masks to isolate areas that meet both criteria.
+
+- **Apply Combined Mask to ET Image:**
+  - Masks the ET image to include only areas of the current land cover class and soil group.
+
+- **Compute Statistics:**
+  - Calculates ET statistics using `reduceRegion` with combined reducers.
+  - Computes the total area of the combined land cover class and soil group within the AOI.
+
+- **Store Results:**
+  - Creates an `ee.Feature` with the combined statistics and adds it to `resultsList`.
+
+### 9. Export Results
+
+- Converts `resultsList` to an `ee.FeatureCollection` named `resultsFC`.
+- Exports `resultsFC` to Google Drive as a CSV file using `Export.table.toDrive()`.
+
+---
+
+## Output Details
+
+The exported CSV file contains the following columns:
+
+- **Year:** The year of the ET data.
+- **LandCoverClass:** Descriptive name of the land cover class.
+- **LandCoverValue:** Numerical value representing the land cover class.
+- **SoilGroup:** Descriptive name of the soil group (or 'All' if not specified).
+- **SoilValue:** Numerical value representing the soil group (or 'All' if not specified).
+- **Min_ET:** Minimum ET value within the specified class/group.
+- **Max_ET:** Maximum ET value within the specified class/group.
+- **Mean_ET:** Mean ET value.
+- **Median_ET:** Median ET value.
+- **StdDev_ET:** Standard deviation of ET values.
+- **Percentile25_ET:** 25th percentile of ET values.
+- **Percentile75_ET:** 75th percentile of ET values.
+- **PixelCount:** Number of pixels included in the computation.
+- **AreaSqKm:** Total area in square kilometers for the specified class/group.
+
+---
+
+## Notes and Considerations
+
+### Processing Time
+
+- **Duration:** Processing multiple years and combinations can be time-consuming.
+- **Optimization:** Consider running the script during off-peak hours or processing a subset of years if you encounter delays.
+
+### Data Volume
+
+- **File Size:** The resulting CSV file may be large due to the number of records.
+- **Storage:** Ensure you have sufficient storage space in your Google Drive.
+
+### Asset Accessibility
+
+- **ET Images:** Confirm that all ET images are accessible and properly named.
+- **Alternative Paths:** If using different asset paths, update the `etImagePath` variable accordingly.
+
+### Band Names
+
+- **Consistency:** The script renames ET image bands to `'ET'` to ensure consistent key names in the statistics dictionaries.
+- **Verification:** If you encounter errors, verify the band names of your images.
+
+### Error Handling
+
+- **Null Values:** Some combinations may result in `null` statistics if there are no pixels meeting the criteria.
+- **Missing Keys:** Ensure that the keys used to access statistics match the keys in the `stats` dictionaries.
+
+### Adjusting Parameters
+
+- **Land Cover Classes and Soil Groups:** Modify the `landcoverClasses` and `soilGroups` objects to focus on different classes or groups.
+- **Years Range:** Adjust `startYear` and `endYear` to process different time periods.
+
+---
+
+## Troubleshooting
+
+### Common Errors
+
+1. **Asset Not Found:**
+
+   - **Issue:** ET image for a specific year is not found.
+   - **Solution:** Verify the image exists in your assets and the path is correct.
+
+2. **Dictionary Key Errors:**
+
+   - **Issue:** Errors like `Dictionary.get: Dictionary does not contain key: 'ET_mean'`.
+   - **Solution:** Ensure the band names are consistent and match the keys in the `stats` dictionaries.
+
+3. **Computation Limits Exceeded:**
+
+   - **Issue:** Errors related to `maxPixels` or computational limits.
+   - **Solution:** Increase the `maxPixels` parameter or reduce the number of years/classes processed.
+
+4. **Export Task Fails:**
+
+   - **Issue:** Export does not complete or fails silently.
+   - **Solution:** Check the **Tasks** tab for error messages and ensure you have sufficient Google Drive storage.
+
+### Tips
+
+- **Testing:** Start by processing a single year or a smaller range to ensure the script runs correctly.
+- **Print Statements:** Use `print()` statements to debug and verify intermediate outputs.
+- **GEE Documentation:** Refer to the [Google Earth Engine API Documentation](https://developers.google.com/earth-engine/guides) for detailed information on functions and methods.
+
+---
+
+Contact Information
+
+If you have questions or need further assistance, please contact:
+
+- Name: Horia Olariu
+- Email: horia@tamu.edu
+- GitHub:** [Your GitHub Profile URL]
+- Affiliation: Texas A&M University - ECCB
+
+---
+
+**Disclaimer:** This script and associated data are provided "as is" without warranty of any kind. The user assumes all responsibility for any issues arising from the use of this script.
+
+---
+
+**End of README**
+
+---
